@@ -54,6 +54,8 @@ class OutputChannel(InstrumentChannel):
             return output
 
         self.model = self._parent.model
+        
+        self.channel = channum
 
         self.add_parameter('function_type',
                            label='Channel {} function type'.format(channum),
@@ -120,6 +122,13 @@ class OutputChannel(InstrumentChannel):
                            get_cmd='OUTPut{}?'.format(channum),
                            val_mapping={'ON': 1, 'OFF': 0}
                            )
+        
+        self.add_parameter('load',
+                           label='Channel {} output impedance (ohms)'.format(channum),
+                           set_cmd='OUTPut{}:LOAD {{}}'.format(channum),
+                           get_cmd='OUTPut{}:LOAD?'.format(channum),
+                           vals = vals.Enum(vals.Numbers(1, 10000), "INF")
+                           )
 
         self.add_parameter('ramp_symmetry',
                            label='Channel {} ramp symmetry'.format(channum),
@@ -136,6 +145,18 @@ class OutputChannel(InstrumentChannel):
                            get_cmd='SOURce{}:FUNCtion:PULSE:WIDTh?'.format(channum),
                            get_parser=float,
                            unit='S')
+        
+        self.add_parameter('arb_sample_rate',
+                           set_cmd='SOUR{}:FUNC:ARB:SRATE {{}}'.format(channum),
+                           docstring='Sample rate for the arbitrary waveform (each datapoint is a sample). Min 1μSa/s; max 1GSa/s or 250MSa/s for arb_filter "off"',
+                           )
+        
+        self.add_parameter('arb_filter',
+                           set_cmd='SOUR{}:FUNC:ARB:FILT {{}}'.format(channum),
+                           docstring='Filter for arbitrary wavefrom (i.e. how it is processed). Options NORMal (slightly smoothed, tends to overshoot and fluctuate slightly at \
+                           edge of large jumps), STEP (smoothest), OFF (jumps immediately to new value)',
+                           vals = vals.Enum("NORM", "STEP", "OFF")
+                           )
 
         # TRIGGER MENU
         self.add_parameter('trigger_source',
@@ -151,6 +172,14 @@ class OutputChannel(InstrumentChannel):
                            set_cmd='TRIGger{}:SLOPe {{}}'.format(channum),
                            get_cmd='TRIGger{}:SLOPe?'.format(channum),
                            vals=vals.Enum('POS', 'NEG'),
+                           get_parser=str.rstrip
+                           )
+        
+        self.add_parameter('trigger_level',
+                           label='Channel {} trigger level'.format(channum),
+                           set_cmd='TRIGger{}:LEV {{}}'.format(channum),
+                           get_cmd='TRIGger{}:LEV?'.format(channum),
+                           vals=vals.Numbers(0.9, 3.8),
                            get_parser=str.rstrip
                            )
 
@@ -245,6 +274,27 @@ class OutputChannel(InstrumentChannel):
                                       'between the starts of consecutive '
                                       'bursts when trigger is immediate.')
                            )
+    def write_arb(self, filename, data_list):
+        """Places arbitrary waveform data in the volatile memory. Data_list should be a list of real numbers from [-1,1]."""
+        data_block = '#{}{}{}'.format(len(str(2*len(data_list))), 2*len(data_list), ''.join(DAC(element) for element in data_list))
+        self.write('SOUR{}:DATA:ARB:DAC {}, {}'.format(self.channel, filename, data_block))
+        
+    def clear_volatile(self):
+        """Clears volatile memory."""
+        self.write("SOUR{}:DATA:VOL:CLE".format(self.channel))
+
+    def save_file(self, filename):
+        """Saves the file currently loaded in specified channel to the location specified by the filename parameter"""
+        self.write('MMEM:STOR:DATA{:d} "{}"'.format(self.channel, filename))
+
+    def load_file(self, filename):
+        """Loads file at specified location to selected channel's volatile memory"""
+        self.write("MMEM:LOAD:DATA{} {}".format(self.channel, filename))
+        self.write("SOUR{}:FUNC:ARB {}".format(self.channel, filename))
+
+    def select_file(self, filename):
+        """Selects file from volatile memory to be played."""
+        self.write("SOUR{}:FUNC:ARB {}".format(self.channel, filename))
 
 
 class SyncChannel(InstrumentChannel):
@@ -302,6 +352,7 @@ class WaveformGenerator_33XXX(KeysightErrorQueueMixin, VisaInstrument):
                           '33511B': 1,
                           '33512B': 2,
                           '33522B': 2,
+                          '33612A': 2,
                           '33622A': 2,
                           '33510B': 2,
                           }
@@ -311,6 +362,7 @@ class WaveformGenerator_33XXX(KeysightErrorQueueMixin, VisaInstrument):
                            '33512B': 20e6,
                            '33250A': 80e6,
                            '33522B': 30e6,
+                           '33612A': 80e6,
                            '33622A': 120e6,
                            '33510B': 20e6,
                           }
@@ -323,6 +375,12 @@ class WaveformGenerator_33XXX(KeysightErrorQueueMixin, VisaInstrument):
 
         sync = SyncChannel(self, 'sync')
         self.add_submodule('sync', sync)
+        
+        self.add_parameter('clock_source',
+                           get_cmd='ROSC:SOUR?',
+                           set_cmd='ROSC:SOURCE {}',
+                           docstring='Source of reference oscillator',
+                           )
 
         self.add_function('force_trigger', call_cmd='*TRG')
 
@@ -330,3 +388,17 @@ class WaveformGenerator_33XXX(KeysightErrorQueueMixin, VisaInstrument):
 
         if not silent:
             self.connect_message()
+            
+    def delete_file(self, filename):
+        self.write('MMEM:DEL "{}"'.format(filename))
+        
+def DAC(num):
+    """Multiplies num by 32767, and converts the result to text using latin-1 encoding in big-endian format."""
+    if round(32767*num) >=0 and num <= 1:
+        entry = round(32767*num)        
+    elif round(32767*num) < 0 and num >= -1:
+        entry = 65536 + round(32767*num)
+    else:
+        raise ValueError("Entry must be a float or integer between -1 and 1")
+    result = bytearray.fromhex(hex(entry)[2:].rjust(4, '0')).decode('latin-1')
+    return result    
